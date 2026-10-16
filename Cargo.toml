@@ -1,0 +1,25 @@
+[package]
+name = "pkt2ai"
+version = "0.1.0"
+edition = "2024"
+description = "Decode Cisco Packet Tracer files and inspect their topology"
+license = "MIT"
+
+[lib]
+name = "pkt2ai"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pkt2ai"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+flate2 = "1.1.10"
+
+[profile.release]
+lto = "thin"
+strip = true
+
