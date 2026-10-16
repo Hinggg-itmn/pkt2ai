@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use crate::crypto::{eax_decrypt, eax_encrypt};
+use crate::crypto::{eax_decrypt, eax_decrypt_unchecked, eax_encrypt};
 
 const KEY: [u8; 16] = [0x89; 16];
 const NONCE: [u8; 16] = [0x10; 16];
@@ -65,6 +65,10 @@ fn inner(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn pkt_to_xml(data: &[u8]) -> Result<Vec<u8>, PktError> {
+    pkt_to_xml_with_verify(data, true)
+}
+
+pub fn pkt_to_xml_with_verify(data: &[u8], verify: bool) -> Result<Vec<u8>, PktError> {
     // Four qCompress length bytes plus the 16-byte EAX tag is the true
     // structural minimum.  Real Packet Tracer documents are much larger,
     // while accepting this minimum makes xml_to_pkt round-trip tiny inputs.
@@ -74,8 +78,11 @@ pub fn pkt_to_xml(data: &[u8]) -> Result<Vec<u8>, PktError> {
     let outer = outer_decode(data);
     let split = outer.len() - 16;
     let tag: [u8; 16] = outer[split..].try_into().expect("tag length");
-    let plaintext =
-        eax_decrypt(KEY, NONCE, &outer[..split], tag).ok_or(PktError::Authentication)?;
+    let plaintext = if verify {
+        eax_decrypt(KEY, NONCE, &outer[..split], tag).ok_or(PktError::Authentication)?
+    } else {
+        eax_decrypt_unchecked(KEY, NONCE, &outer[..split])
+    };
     let compressed = inner(&plaintext);
     if compressed.len() < 4 {
         return Err(PktError::Truncated);

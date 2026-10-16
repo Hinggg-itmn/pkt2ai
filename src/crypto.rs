@@ -283,6 +283,13 @@ pub fn eax_decrypt(
     (different == 0).then(|| ctr(&cipher, n, ciphertext))
 }
 
+/// Decrypt without authenticating, for the diagnostic `--no-verify` flag.
+pub fn eax_decrypt_unchecked(key: [u8; 16], nonce: [u8; 16], ciphertext: &[u8]) -> Vec<u8> {
+    let cipher = Twofish128::new(key);
+    let counter = omac(&cipher, 0, &nonce);
+    ctr(&cipher, counter, ciphertext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

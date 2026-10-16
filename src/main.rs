@@ -1,3 +1,3 @@
 fn main() {
-    eprintln!("pkt2ai: CLI commands are added in the next implementation stage");
+    std::process::exit(i32::from(pkt2ai::cli::run()));
 }
