@@ -1,3 +1,8 @@
+//! State machine và vòng đời giao diện TUI.
+//!
+//! Dữ liệu/thuật toán nằm ở core; module này chỉ điều phối input, worker layout,
+//! viewport và các widget ratatui.
+
 use super::{
     canvas::{Viewport, widget as graph_widget},
     export_dialog::{ExportDialog, TuiExportFormat},
@@ -6,7 +11,7 @@ use super::{
 use crate::{
     Counts, Info, extract,
     graph::Graph,
-    layout::{Point, force_directed, packet_tracer},
+    layout::{Point, fit_to_view, force_directed, layered, packet_tracer},
     to_markdown, xml_to_pkt,
 };
 use crossterm::{
@@ -39,6 +44,7 @@ use std::{
 const LAYOUT_SEED: u64 = 0x504b_5432_4149;
 
 #[derive(Debug)]
+/// Mode quyết định cùng một phím có ý nghĩa gì trong từng hộp thoại.
 enum Mode {
     Normal,
     Help,
@@ -51,11 +57,17 @@ enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LayoutMode {
-    Force,
+/// Ba cách bố trí mà phím `g` xoay vòng theo đúng thứ tự này.
+pub enum LayoutMode {
     PacketTracer,
+    Layered,
+    Force,
 }
 
+/// Toàn bộ state dài hạn của một phiên TUI.
+///
+/// `Info` là dữ liệu gốc dùng cho panel/export, còn `Graph` là index phục vụ
+/// truy vấn lân cận và render nhanh.
 pub struct TopologyApp {
     pub info: Info,
     pub graph: Graph,
@@ -75,14 +87,28 @@ pub struct TopologyApp {
     mode: Mode,
     link_cursor: usize,
     canvas_area: Rect,
+    last_fit_area: [u16; 2],
+    last_fit_visible: BTreeSet<usize>,
+    fit_dirty: bool,
+    panel_visible: bool,
     drag_at: Option<(u16, u16)>,
     status: String,
 }
 
 impl TopologyApp {
+    /// Tạo app từ summary đã trích xuất.
+    ///
+    /// Ưu tiên tọa độ Packet Tracer nếu có; nếu hoàn toàn thiếu `xy` thì dùng
+    /// layout Tầng để màn hình đầu tiên vẫn có cấu trúc dễ đọc.
     pub fn from_info(info: Info) -> Self {
         let graph = Graph::new(&info);
-        let positions = force_directed(&graph, LAYOUT_SEED, 100);
+        let has_packet_tracer_positions = graph.nodes.iter().any(|node| node.xy.is_some());
+        let visible = graph.visible_nodes(&BTreeSet::new(), false, None);
+        let (positions, layout_mode) = if has_packet_tracer_positions {
+            (packet_tracer(&graph, LAYOUT_SEED), LayoutMode::PacketTracer)
+        } else {
+            (layered(&graph, &visible).positions, LayoutMode::Layered)
+        };
         let selected = (!graph.nodes.is_empty()).then_some(0);
         Self {
             info,
@@ -98,11 +124,15 @@ impl TopologyApp {
             kind_filter: BTreeSet::new(),
             local_depth: None,
             viewport: Viewport::default(),
-            layout_mode: LayoutMode::Force,
+            layout_mode,
             layout_rx: None,
             mode: Mode::Normal,
             link_cursor: 0,
             canvas_area: Rect::default(),
+            last_fit_area: [0, 0],
+            last_fit_visible: BTreeSet::new(),
+            fit_dirty: true,
+            panel_visible: true,
             drag_at: None,
             status: String::new(),
         }
@@ -140,7 +170,6 @@ impl TopologyApp {
         if let Some(directory) = path.parent() {
             remember_directory(directory);
         }
-        app.start_layout();
         Ok(app)
     }
 
@@ -167,6 +196,8 @@ impl TopologyApp {
         let seed = LAYOUT_SEED;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
+            // Graph lớn giảm số vòng để worker vẫn phản hồi nhanh; seed cố
+            // định bảo đảm test và lần render sau cho cùng kết quả.
             let _ = tx.send(force_directed(
                 &graph,
                 seed,
@@ -182,13 +213,14 @@ impl TopologyApp {
             && let Ok(positions) = receiver.try_recv()
         {
             self.positions = positions;
-            self.fit_view();
+            self.fit_dirty = true;
             self.layout_rx = None;
             self.status = "bo tri force da san sang".to_owned();
         }
     }
 
     fn visible(&self) -> BTreeSet<usize> {
+        // Tập visible là giao của filter loại, lựa chọn isolate và local graph.
         self.graph.visible_nodes(
             &self.kind_filter,
             self.show_isolated,
@@ -200,7 +232,7 @@ impl TopologyApp {
         let visible = self.visible();
         if self
             .selected
-            .is_none_or(|selected| !visible.contains(&selected))
+            .is_some_and(|selected| !visible.contains(&selected))
         {
             self.selected = visible.first().copied();
         }
@@ -222,15 +254,34 @@ impl TopologyApp {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(area);
-        let panel_width = if area.width < 100 { 30 } else { 40 };
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(20), Constraint::Length(panel_width)])
-            .split(rows[0]);
-        self.canvas_area = columns[0];
+        let (canvas_area, panel_area) = if self.panel_visible {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+                .split(rows[0]);
+            (columns[0], Some(columns[1]))
+        } else {
+            (rows[0], None)
+        };
+        self.canvas_area = canvas_area;
         let visible = self.visible();
-        let aspect = f64::from(columns[0].width.saturating_sub(2))
-            / f64::from(columns[0].height.saturating_sub(2).max(1));
+        let inner_size = [
+            canvas_area.width.saturating_sub(2).max(1),
+            canvas_area.height.saturating_sub(2).max(1),
+        ];
+        // Cache fit chỉ hợp lệ khi layout, tập node hiện và kích thước canvas
+        // đều không đổi. Resize/filter/local graph vì thế tự fit lại.
+        if self.fit_dirty || self.last_fit_area != inner_size || self.last_fit_visible != visible {
+            self.viewport.reset_fit(fit_to_view(
+                &self.positions,
+                &visible,
+                inner_size[0],
+                inner_size[1],
+            ));
+            self.last_fit_area = inner_size;
+            self.last_fit_visible = visible.clone();
+            self.fit_dirty = false;
+        }
         frame.render_widget(
             graph_widget(
                 &self.graph,
@@ -239,65 +290,96 @@ impl TopologyApp {
                 self.selected,
                 self.labels,
                 self.viewport,
-                aspect,
+                inner_size,
             ),
-            columns[0],
+            canvas_area,
         );
-        frame.render_widget(self.detail_widget(), columns[1]);
+        if let Some(panel_area) = panel_area {
+            frame.render_widget(self.detail_widget(), panel_area);
+        }
         frame.render_widget(self.status_widget(visible.len()), rows[1]);
         self.render_overlay(frame, area);
     }
 
     fn detail_widget(&self) -> Paragraph<'_> {
-        let text = self
+        let lines = self
             .selected
             .and_then(|index| self.graph.nodes.get(index))
             .map_or_else(
-                || "Chua chon node".to_owned(),
+                || vec![Line::raw("Chua chon node")],
                 |device| {
-                    let mut text = format!("{}\n{} {}\n\n", device.name, device.kind, device.model);
-                    for port in &device.ports {
-                        if let Some(ip) = &port.ip {
-                            text.push_str(&format!("{}: {ip}\n", port.kind));
-                        }
+                    let mut lines = vec![Line::styled(
+                        device.name.clone(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    let identity = match (device.kind.is_empty(), device.model.is_empty()) {
+                        (false, false) => format!("{} · {}", device.kind, device.model),
+                        (false, true) => device.kind.clone(),
+                        (true, false) => device.model.clone(),
+                        (true, true) => String::new(),
+                    };
+                    if !identity.is_empty() {
+                        lines.push(Line::raw(identity));
                     }
-                    for interface in &device.interfaces {
-                        text.push_str(&format!(
-                            "{}: {}\n",
-                            interface.name,
-                            interface.ip.as_deref().unwrap_or("-")
+                    let mut ips: Vec<&str> = device
+                        .ports
+                        .iter()
+                        .filter_map(|port| port.ip.as_deref())
+                        .chain(
+                            device
+                                .interfaces
+                                .iter()
+                                .filter_map(|interface| interface.ip.as_deref()),
+                        )
+                        .collect();
+                    ips.sort_unstable();
+                    ips.dedup();
+                    if !ips.is_empty() {
+                        lines.push(Line::raw(format!("IP: {}", ips.join(", "))));
+                    }
+                    let links = crate::links_of(&self.info, &device.name);
+                    if !links.is_empty() {
+                        lines.push(Line::raw(""));
+                        lines.push(Line::styled(
+                            "Liên kết · j/k, Enter",
+                            Style::default().fg(Color::LightCyan),
                         ));
                     }
-                    text.push_str("\nLien ket (j/k, Enter):\n");
-                    for (index, link) in
-                        crate::links_of(&self.info, &device.name).iter().enumerate()
-                    {
+                    // Mỗi liên kết luôn chiếm đúng hai dòng; tắt Wrap để tên
+                    // thiết bị và tên cổng không bị ratatui tách tùy ý.
+                    for (index, link) in links.iter().enumerate() {
                         let (peer, own, remote) = if link.a == device.name {
                             (&link.b, &link.a_port, &link.b_port)
                         } else {
                             (&link.a, &link.b_port, &link.a_port)
                         };
-                        text.push_str(&format!(
-                            "{} {} ↔ {}:{}\n",
-                            if index == self.link_cursor { ">" } else { " " },
-                            own,
-                            peer,
-                            remote
-                        ));
+                        let marker = if index == self.link_cursor { ">" } else { " " };
+                        lines.push(Line::raw(format!(
+                            "{marker} {:<8}  →  {}",
+                            short_port(own),
+                            peer
+                        )));
+                        lines.push(Line::raw(format!(
+                            "            cổng {}",
+                            short_port(remote)
+                        )));
                     }
                     if !device.config_other.is_empty() {
-                        text.push_str("\nConfig:\n");
+                        lines.push(Line::raw(""));
+                        lines.push(Line::styled(
+                            "Config",
+                            Style::default().fg(Color::LightCyan),
+                        ));
                         for line in &device.config_other {
-                            text.push_str(line);
-                            text.push('\n');
+                            lines.push(Line::raw(line.clone()));
                         }
                     }
-                    text
+                    lines
                 },
             );
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" Chi tiet "))
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Chi tiết "))
     }
 
     fn status_widget(&self, visible: usize) -> Paragraph<'_> {
@@ -306,10 +388,16 @@ impl TopologyApp {
         } else {
             "SECRETS VISIBLE"
         };
-        let layout = if self.layout_mode == LayoutMode::Force {
-            "force"
+        let layout = match self.layout_mode {
+            LayoutMode::PacketTracer => "Packet Tracer",
+            LayoutMode::Layered => "Tầng",
+            LayoutMode::Force => "Force",
+        };
+        let zoom = (self.viewport.zoom * 100.0).round() as u32;
+        let fit = if (self.viewport.zoom - 1.0).abs() < 0.001 {
+            " (fit)"
         } else {
-            "Packet Tracer"
+            ""
         };
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -323,9 +411,8 @@ impl TopologyApp {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " {visible}/{} node · {layout} · zoom {:.1} · local {} · {}   ?:help",
+                " {visible}/{} node · {layout} · zoom {zoom}%{fit} · local {} · {}   ?:help",
                 self.graph.nodes.len(),
-                self.viewport.zoom,
                 self.local_depth
                     .map_or("off".to_owned(), |depth| depth.to_string()),
                 self.status
@@ -346,19 +433,21 @@ impl TopologyApp {
                 frame.render_widget(Clear, popup);
                 let help = vec![
                     Line::raw("? help  q quit  o open  e export  / search  f filter"),
-                    Line::raw("l labels  r relayout  g force/original  +/- zoom  arrows pan"),
-                    Line::raw("[ ] local depth  s secrets  i isolated  Tab select"),
+                    Line::raw("l labels  r relayout  g PT/Tầng/Force  0 fit  +/- zoom"),
+                    Line::raw("p panel  arrows pan  i isolated  [/] local depth"),
+                    Line::raw("s secrets  Tab select"),
                     Line::raw("j/k choose link, Enter jump  mouse drag/scroll/click"),
                     Line::raw(""),
                     Line::from(vec![
                         Span::raw("Mau: "),
-                        Span::styled("◆ Router  ", Style::default().fg(Color::Yellow)),
-                        Span::styled("■ Switch  ", Style::default().fg(Color::Blue)),
-                        Span::styled("⬢ L3  ", Style::default().fg(Color::Cyan)),
-                        Span::styled("● PC/Laptop  ", Style::default().fg(Color::Green)),
-                        Span::styled("▣ Server  ", Style::default().fg(Color::Red)),
-                        Span::styled("▲ AP  ", Style::default().fg(Color::Magenta)),
-                        Span::styled("▤ Printer", Style::default().fg(Color::White)),
+                        Span::styled("Router  ", Style::default().fg(Color::LightYellow)),
+                        Span::styled("Switch  ", Style::default().fg(Color::LightBlue)),
+                        Span::styled("L3  ", Style::default().fg(Color::LightCyan)),
+                        Span::styled("PC  ", Style::default().fg(Color::LightGreen)),
+                        Span::styled("Laptop  ", Style::default().fg(Color::Cyan)),
+                        Span::styled("Server  ", Style::default().fg(Color::LightRed)),
+                        Span::styled("AP  ", Style::default().fg(Color::LightMagenta)),
+                        Span::styled("Printer", Style::default().fg(Color::White)),
                     ]),
                     Line::raw(""),
                     Line::raw("Esc/?: dong"),
@@ -695,29 +784,36 @@ impl TopologyApp {
             }
             KeyCode::Char('l') => self.labels = !self.labels,
             KeyCode::Char('i') => self.show_isolated = !self.show_isolated,
-            KeyCode::Char('r') => {
-                self.layout_mode = LayoutMode::Force;
-                self.start_layout();
+            KeyCode::Char('p') => {
+                self.panel_visible = !self.panel_visible;
+                self.fit_dirty = true;
             }
+            KeyCode::Char('r') => self.apply_layout(self.layout_mode, true),
             KeyCode::Char('g') => {
-                if self.layout_mode == LayoutMode::Force {
-                    self.layout_mode = LayoutMode::PacketTracer;
-                    self.positions = packet_tracer(&self.graph, LAYOUT_SEED);
-                    self.fit_view();
-                    self.layout_rx = None;
-                } else {
-                    self.layout_mode = LayoutMode::Force;
-                    self.start_layout();
-                }
+                let next = match self.layout_mode {
+                    LayoutMode::PacketTracer => LayoutMode::Layered,
+                    LayoutMode::Layered => LayoutMode::Force,
+                    LayoutMode::Force => LayoutMode::PacketTracer,
+                };
+                self.apply_layout(next, true);
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.viewport.zoom = (self.viewport.zoom * 1.2).min(20.0)
             }
             KeyCode::Char('-') => self.viewport.zoom = (self.viewport.zoom / 1.2).max(0.1),
-            KeyCode::Left => self.viewport.center[0] -= 10.0 / self.viewport.zoom,
-            KeyCode::Right => self.viewport.center[0] += 10.0 / self.viewport.zoom,
-            KeyCode::Up => self.viewport.center[1] += 10.0 / self.viewport.zoom,
-            KeyCode::Down => self.viewport.center[1] -= 10.0 / self.viewport.zoom,
+            KeyCode::Char('0') => self.fit_dirty = true,
+            KeyCode::Left => {
+                self.viewport.pan[0] -= self.viewport.fit.half_size[0] * 0.12 / self.viewport.zoom
+            }
+            KeyCode::Right => {
+                self.viewport.pan[0] += self.viewport.fit.half_size[0] * 0.12 / self.viewport.zoom
+            }
+            KeyCode::Up => {
+                self.viewport.pan[1] += self.viewport.fit.half_size[1] * 0.12 / self.viewport.zoom
+            }
+            KeyCode::Down => {
+                self.viewport.pan[1] -= self.viewport.fit.half_size[1] * 0.12 / self.viewport.zoom
+            }
             KeyCode::Char(']') => self.local_depth = Some(self.local_depth.unwrap_or(0) + 1),
             KeyCode::Char('[') => {
                 self.local_depth = self.local_depth.and_then(|depth| depth.checked_sub(1))
@@ -749,10 +845,42 @@ impl TopologyApp {
         self.link_cursor = 0;
     }
 
-    fn fit_view(&mut self) {
-        let [min_x, max_x, min_y, max_y] = crate::layout::bounds(&self.positions);
-        self.viewport.center = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
-        self.viewport.zoom = (160.0 / (max_x - min_x).max(max_y - min_y).max(1.0)).clamp(0.1, 5.0);
+    fn apply_layout(&mut self, mode: LayoutMode, threaded: bool) {
+        // Cả ba layout cuối cùng đều đánh dấu fit bẩn, nên render kế tiếp đi
+        // qua cùng một bước chuẩn hóa viewport.
+        self.layout_mode = mode;
+        match mode {
+            LayoutMode::PacketTracer => {
+                self.positions = packet_tracer(&self.graph, LAYOUT_SEED);
+                self.layout_rx = None;
+            }
+            LayoutMode::Layered => {
+                self.positions = layered(&self.graph, &self.visible()).positions;
+                self.layout_rx = None;
+            }
+            LayoutMode::Force if threaded => self.start_layout(),
+            LayoutMode::Force => {
+                self.positions = force_directed(&self.graph, LAYOUT_SEED, 120);
+                self.layout_rx = None;
+            }
+        }
+        self.fit_dirty = true;
+    }
+
+    pub fn set_layout_for_test(&mut self, mode: LayoutMode) {
+        self.apply_layout(mode, false);
+    }
+
+    pub fn visible_for_test(&self) -> BTreeSet<usize> {
+        self.visible()
+    }
+
+    pub fn viewport_for_test(&self) -> Viewport {
+        self.viewport
+    }
+
+    pub fn canvas_area_for_test(&self) -> Rect {
+        self.canvas_area
     }
 
     fn jump_link(&mut self) {
@@ -785,6 +913,7 @@ impl TopologyApp {
             Ok(info) => {
                 self.info = info;
                 self.graph = Graph::new(&self.info);
+                self.apply_layout(self.layout_mode, false);
                 self.status = if self.redact {
                     "da che secret"
                 } else {
@@ -806,10 +935,15 @@ impl TopologyApp {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some((column, row)) = self.drag_at.replace((event.column, event.row)) {
-                    self.viewport.center[0] -=
-                        f64::from(event.column as i32 - column as i32) * 3.0 / self.viewport.zoom;
-                    self.viewport.center[1] +=
-                        f64::from(event.row as i32 - row as i32) * 6.0 / self.viewport.zoom;
+                    // Đổi delta ô terminal sang delta world-space theo bounds
+                    // hiện tại để tốc độ pan không phụ thuộc mức zoom.
+                    let (xb, yb) = self.viewport.bounds();
+                    let width = f64::from(self.canvas_area.width.saturating_sub(2).max(1));
+                    let height = f64::from(self.canvas_area.height.saturating_sub(2).max(1));
+                    self.viewport.pan[0] -=
+                        f64::from(event.column as i32 - column as i32) * (xb[1] - xb[0]) / width;
+                    self.viewport.pan[1] +=
+                        f64::from(event.row as i32 - row as i32) * (yb[1] - yb[0]) / height;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag_at = None,
@@ -822,9 +956,7 @@ impl TopologyApp {
         if column <= area.x || row <= area.y || column >= area.right() || row >= area.bottom() {
             return;
         }
-        let aspect = f64::from(area.width.saturating_sub(2))
-            / f64::from(area.height.saturating_sub(2).max(1));
-        let (xb, yb) = self.viewport.bounds(aspect);
+        let (xb, yb) = self.viewport.bounds();
         let x = xb[0]
             + f64::from(column - area.x - 1) / f64::from(area.width.saturating_sub(2).max(1))
                 * (xb[1] - xb[0]);
@@ -840,7 +972,9 @@ impl TopologyApp {
                     .map(|point| (index, (point[0] - x).hypot(point[1] - y)))
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance < 15.0 / self.viewport.zoom)
+            .filter(|(_, distance)| {
+                *distance < (xb[1] - xb[0]) / f64::from(area.width.max(1)) * 2.0
+            })
             .map(|(index, _)| index);
     }
 
@@ -946,6 +1080,11 @@ fn default_export_path(source: Option<&Path>) -> String {
         || "topology.json".to_owned(),
         |stem| format!("{}.json", stem.to_string_lossy()),
     )
+}
+
+fn short_port(port: &str) -> String {
+    port.replace("GigabitEthernet", "Gi")
+        .replace("FastEthernet", "Fa")
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {

@@ -65,12 +65,13 @@ Phím:
 
 - `?` trợ giúp, `q` thoát, `o` mở file, `e` xuất, `/` tìm, `f` lọc loại.
 - `Tab` chọn node kế tiếp; `j`/`k` chọn liên kết trong panel và `Enter` nhảy sang đầu kia.
-- `l` bật nhãn, `r` chạy lại force layout, `g` đổi force/vị trí Packet Tracer.
-- `+`/`-` zoom, mũi tên pan, `[`/`]` đổi độ sâu local graph.
+- `l` bật nhãn, `r` chạy lại layout, `g` xoay vòng Packet Tracer → Tầng → Force.
+- `0` fit-to-view, `+`/`-` zoom theo phần trăm so với fit, mũi tên pan, `[`/`]` đổi độ sâu local graph.
+- `p` bật/tắt panel chi tiết (trong hộp xuất, `p` vẫn dùng để sửa đường dẫn).
 - `s` bật/tắt che secret, `i` bật/tắt node cô lập.
 - Chuột: click chọn, kéo để pan, cuộn để zoom. Mọi thao tác đều có phương án bàn phím.
 
-Đồ thị dùng Braille 2×4 dots, giữ đa cạnh và làm mờ node ngoài vùng chọn. Force layout chạy trên worker thread với seed tái lập. Palette chỉ dùng màu ANSI cơ bản nên hoạt động ở terminal 16/256 màu; không cần truecolor.
+Đồ thị dùng Braille 2×4 dots, tự fit theo đúng tỉ lệ lưới chấm, giữ đa cạnh và làm mờ node ngoài vùng chọn. Layout Tầng dùng BFS từ router/core; Force layout chạy trên worker thread với seed tái lập. Palette chỉ dùng màu ANSI cơ bản nên hoạt động ở terminal 16/256 màu; không cần truecolor.
 
 Hộp xuất TUI hỗ trợ JSON, Markdown, XML, `.pkt`, Obsidian vault, DOT, Mermaid, GraphML và SVG. Nhấn `p` để sửa đường dẫn, `Tab` để đổi giữa toàn graph/phần đang hiện. File có sẵn luôn yêu cầu xác nhận.
 
@@ -89,6 +90,8 @@ Cấu trúc chính:
 - `src/graph.rs`, `src/layout.rs`, `src/export.rs`: logic không phụ thuộc terminal.
 - `src/tui/`: ratatui canvas, app, file picker và export dialog.
 - `tests/`: vector crypto, đối chiếu Python, CLI/BrokenPipe, graph/export và TestBackend TUI.
+
+Các quyết định kỹ thuật, chiều phụ thuộc module và thuật toán đồ thị được mô tả chi tiết trong [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Giới hạn
 

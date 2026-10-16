@@ -1,5 +1,6 @@
 use std::{fs, path::PathBuf};
 
+#[allow(dead_code)]
 pub const SAMPLE_XML: &str = r#"<PACKETTRACER5>
 <VERSION>9.0.1</VERSION><NETWORK><DEVICES>
 <DEVICE><ENGINE><NAME>PC 1</NAME><TYPE model="PC-PT">Pc</TYPE><GATEWAY>10.0.0.1</GATEWAY>
@@ -25,4 +26,71 @@ pub fn temp_file(label: &str, content: &[u8]) -> PathBuf {
     let path = std::env::temp_dir().join(format!("pkt2ai-{label}-{}", std::process::id()));
     fs::write(&path, content).unwrap();
     path
+}
+
+/// Cây campus 48 thiết bị, bốn tầng dùng để đo khả năng đọc của TUI:
+/// router → hai core → mười access switch → ba mươi lăm endpoint.
+#[allow(dead_code)]
+pub fn layered_info_48() -> pkt2ai::Info {
+    let mut xml = String::from("<PACKETTRACER5><VERSION>9.0.1</VERSION><NETWORK><DEVICES>");
+    for index in 0..48 {
+        let (name, kind, model) = match index {
+            0 => ("Router-HQ".to_owned(), "Router", "ISR4331"),
+            1..=2 => (format!("Core-{index}"), "MultiLayerSwitch", "3650"),
+            3..=12 => (format!("Switch-Phong-{:02}", index - 2), "Switch", "2960"),
+            _ => {
+                let endpoint = index - 12;
+                let (kind, model) = match endpoint % 5 {
+                    0 => ("Laptop", "Laptop-PT"),
+                    1 => ("Server", "Server-PT"),
+                    2 => ("AccessPoint", "AP-PT"),
+                    3 => ("Printer", "Printer-PT"),
+                    _ => ("Pc", "PC-PT"),
+                };
+                (format!("{kind}-Phong-{endpoint:02}"), kind, model)
+            }
+        };
+        xml.push_str(&format!(
+            "<DEVICE><ENGINE><NAME>{name}</NAME><TYPE model=\"{model}\">{kind}</TYPE>"
+        ));
+        if index == 0 || index >= 13 {
+            xml.push_str(&format!(
+                "<PORT><TYPE>GigabitEthernet0/{}</TYPE><IP>10.{}.{}.2</IP><SUBNET>255.255.255.0</SUBNET></PORT>",
+                index % 4,
+                index / 250,
+                index % 250
+            ));
+        }
+        xml.push_str("</ENGINE>");
+        // Cố ý trộn thiết bị có/không có tọa độ Packet Tracer để kiểm tra
+        // fallback của layout PT trên dữ liệu không đầy đủ.
+        if index % 2 == 0 {
+            let (x, y) = if index == 0 {
+                (500, 40)
+            } else if index <= 2 {
+                (250 + (index - 1) * 500, 140)
+            } else if index <= 12 {
+                (80 + (index - 3) * 95, 260)
+            } else {
+                (30 + (index - 13) * 28, 420)
+            };
+            xml.push_str(&format!(
+                "<WORKSPACE><LOGICAL><X>{x}</X><Y>{y}</Y><DEV_ADDR>dev{index}</DEV_ADDR></LOGICAL></WORKSPACE>"
+            ));
+        }
+        xml.push_str("</DEVICE>");
+    }
+    xml.push_str("</DEVICES><LINKS>");
+    for child in 1..48 {
+        let parent = match child {
+            1..=2 => 0,
+            3..=12 => 1 + (child - 3) % 2,
+            _ => 3 + (child - 13) % 10,
+        };
+        xml.push_str(&format!(
+            "<LINK><TYPE>copper</TYPE><CABLE><FROM>{parent}</FROM><TO>{child}</TO><PORT>GigabitEthernet1/0/{child}</PORT><PORT>FastEthernet0/1</PORT><TYPE>straight-through</TYPE></CABLE></LINK>"
+        ));
+    }
+    xml.push_str("</LINKS></NETWORK></PACKETTRACER5>");
+    pkt2ai::extract(xml.as_bytes(), "layered-48.xml", true, false).unwrap()
 }
