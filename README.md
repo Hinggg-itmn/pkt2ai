@@ -100,3 +100,7 @@ Các quyết định kỹ thuật, chiều phụ thuộc module và thuật toá
 - Snapshot headless nằm ở `tests/snapshots/tui_80x24.txt`; hiển thị thực tế còn phụ thuộc font Braille của terminal.
 
 Chỉ dùng cho file của chính bạn hoặc file bạn được phép sử dụng.
+
+## Giấy phép
+
+Dự án được phát hành theo giấy phép [MIT](LICENSE).
