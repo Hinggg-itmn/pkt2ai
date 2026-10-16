@@ -101,6 +101,8 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Open the interactive topology graph.
+    Tui { file: Option<PathBuf> },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -452,6 +454,20 @@ fn execute(command: Command) -> Result<Option<Vec<u8>>, CliError> {
             Ok(Some(
                 format!("[+] {} -> {}\n", input.display(), output.display()).into_bytes(),
             ))
+        }
+        Command::Tui { file } => {
+            #[cfg(feature = "tui")]
+            {
+                crate::tui::run(file).map_err(CliError::ordinary)?;
+                Ok(None)
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                let _ = file;
+                Err(CliError::ordinary(
+                    "ban build nay khong co TUI; build lai khong dung --no-default-features",
+                ))
+            }
         }
     }
 }

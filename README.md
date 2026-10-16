@@ -1,38 +1,99 @@
 # pkt2ai
 
-Giải mã file Cisco Packet Tracer (`.pkt`/`.pka`) sang XML và rút gọn thành JSON/Markdown để đưa cho AI đọc.
-Một file Python duy nhất, chỉ dùng thư viện chuẩn (Python 3.8+), không cần cài thêm gì.
+`pkt2ai` là công cụ Rust để giải mã file Cisco Packet Tracer (`.pkt`) thành XML, rút gọn topology thành JSON/Markdown, truy vấn cấu hình và xem mạng bằng đồ thị TUI tương tác. File `pkt2ai.py` được giữ lại làm bản tham chiếu hành vi.
+
+Định dạng Packet Tracer được xử lý hoàn toàn cục bộ: lớp obfuscation → Twofish-128/EAX → qCompress/zlib. Tag EAX luôn được kiểm tra mặc định; mật khẩu, secret, community và key-string luôn được che mặc định.
+
+## Cài đặt
+
+Với Nix:
 
 ```bash
-python pkt2ai.py decode lab.pkt -o lab.xml          # .pkt -> XML
-python pkt2ai.py encode lab.xml -o lab_moi.pkt      # XML -> .pkt
-python pkt2ai.py summary lab.pkt                    # JSON gọn ra màn hình
-python pkt2ai.py summary lab.pkt --format md -o lab.md   # Markdown cho AI
-python pkt2ai.py tree lab.xml --depth 4             # xem cấu trúc thẻ (debug)
+nix develop
+cargo build --release
+# hoặc chạy trực tiếp
+nix run -- summary lab.pkt
 ```
 
-`summary` nhận cả `.pkt` lẫn `.xml`. Kết quả gồm: thiết bị (loại, model, IP/gateway của PC,
-VLAN, interface + IP trong running-config, khối `router ospf/rip/eigrp`, DHCP pool, ACL, line vty)
-và danh sách liên kết `A:cổng <-> B:cổng`. File XML ~1 MB rút còn ~7–14 KB.
+Với Rust stable:
 
-Tùy chọn của `summary`:
-- Mặc định che `password / secret / community / key-string` thành `<redacted>`. Dùng `--keep-secrets` để giữ nguyên.
-- `--full-config` kèm toàn bộ running-config nguyên văn.
+```bash
+cargo install --path .
+```
 
-## Cách hoạt động
+TUI được bật trong default features. Chỉ build CLI lõi, không kéo ratatui/crossterm:
 
-`.pkt` → đảo byte + XOR → Twofish-EAX (key `0x89`×16, nonce `0x10`×16, tag 16 byte ở cuối)
-→ XOR → 4 byte kích thước gốc (big-endian) + zlib → XML. Twofish, CMAC, CTR, EAX đều tự cài đặt.
+```bash
+cargo build --release --no-default-features
+```
 
-## Đã kiểm tra
+## CLI
 
-- Twofish khớp test vector chuẩn (key 0, plaintext 0 → `9F589F5C…E8C35A`) và khớp 200/200 khối ngẫu nhiên với bản tham chiếu `securedypkt`.
-- Giải mã được 11 file `.pkt` thật (PT 7.1.1), mọi link đều khớp tên thiết bị; round-trip decode → encode → decode cho XML giống hệt.
+```bash
+pkt2ai decode lab.pkt -o lab.xml
+pkt2ai encode lab.xml -o lab-new.pkt
+pkt2ai summary lab.pkt
+pkt2ai summary lab.xml --format md --full-config -o lab.md
+pkt2ai tree lab.xml --depth 4
 
-## Chưa kiểm tra: Packet Tracer 9.x
+pkt2ai list lab.pkt --type Router
+pkt2ai show lab.pkt R1
+pkt2ai links lab.pkt --device R1 --json
+pkt2ai grep lab.pkt 'router|network' -i --device R1
 
-Chưa có file `.pkt` do PT 9.x tạo ra để thử. Nếu giải mã báo `EAX tag khong khop` thì key/định dạng đã đổi.
-Khi đó chạy với `--no-verify`, và xem các byte đầu của file để dò. Nếu giải mã được nhưng `summary` báo
-"không tìm thấy NETWORK/DEVICES" thì tên thẻ XML đã đổi: chạy `tree` rồi sửa đường dẫn trong hàm `extract()`.
+pkt2ai export lab.pkt --format dot -o lab.dot
+pkt2ai export lab.pkt --format mermaid -o lab.mmd
+pkt2ai export lab.pkt --format graphml -o lab.graphml
+pkt2ai export lab.pkt --format svg -o lab.svg
+pkt2ai export lab.pkt --format obsidian -o lab-vault
+```
+
+`decode`, `encode`, `summary` và `tree` chấp nhận `-` cho stdin/stdout. Export không ghi đè nếu thiếu `--force`. Tên thiết bị trong `show`, `links` và `grep` được tìm theo thứ tự: khớp chính xác, khớp không phân biệt hoa thường, rồi chuỗi con duy nhất.
+
+Mã thoát: `0` thành công, `1` lỗi dữ liệu/I/O, `2` sai tham số, `3` grep không có kết quả. Broken pipe (ví dụ `pkt2ai summary lab.pkt | head`) được coi là thoát thành công.
+
+## TUI
+
+```bash
+pkt2ai tui lab.pkt
+pkt2ai tui                 # mở file picker .pkt/.xml/.json
+```
+
+TUI nhận dạng theo nội dung thay vì phần mở rộng. JSON là output của `summary`; nguồn JSON không thể xuất ngược XML/.pkt hay bật hiện secret vì không còn dữ liệu gốc.
+
+Phím:
+
+- `?` trợ giúp, `q` thoát, `o` mở file, `e` xuất, `/` tìm, `f` lọc loại.
+- `Tab` chọn node kế tiếp; `j`/`k` chọn liên kết trong panel và `Enter` nhảy sang đầu kia.
+- `l` bật nhãn, `r` chạy lại force layout, `g` đổi force/vị trí Packet Tracer.
+- `+`/`-` zoom, mũi tên pan, `[`/`]` đổi độ sâu local graph.
+- `s` bật/tắt che secret, `i` bật/tắt node cô lập.
+- Chuột: click chọn, kéo để pan, cuộn để zoom. Mọi thao tác đều có phương án bàn phím.
+
+Đồ thị dùng Braille 2×4 dots, giữ đa cạnh và làm mờ node ngoài vùng chọn. Force layout chạy trên worker thread với seed tái lập. Palette chỉ dùng màu ANSI cơ bản nên hoạt động ở terminal 16/256 màu; không cần truecolor.
+
+Hộp xuất TUI hỗ trợ JSON, Markdown, XML, `.pkt`, Obsidian vault, DOT, Mermaid, GraphML và SVG. Nhấn `p` để sửa đường dẫn, `Tab` để đổi giữa toàn graph/phần đang hiện. File có sẵn luôn yêu cầu xác nhận.
+
+## Phát triển
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Cấu trúc chính:
+
+- `src/crypto.rs`, `src/ptformat.rs`: Twofish/CMAC/CTR/EAX và container Packet Tracer.
+- `src/extract.rs`, `src/cli.rs`: mô hình serde, parser XML, Markdown, truy vấn và CLI.
+- `src/graph.rs`, `src/layout.rs`, `src/export.rs`: logic không phụ thuộc terminal.
+- `src/tui/`: ratatui canvas, app, file picker và export dialog.
+- `tests/`: vector crypto, đối chiếu Python, CLI/BrokenPipe, graph/export và TestBackend TUI.
+
+## Giới hạn
+
+- Chưa có chế độ tô màu theo VLAN/subnet; graph tô màu theo loại thiết bị.
+- File picker lọc theo đuôi để danh sách gọn, nhưng sau khi chọn vẫn nhận dạng nội dung.
+- Snapshot headless nằm ở `tests/snapshots/tui_80x24.txt`; hiển thị thực tế còn phụ thuộc font Braille của terminal.
 
 Chỉ dùng cho file của chính bạn hoặc file bạn được phép sử dụng.

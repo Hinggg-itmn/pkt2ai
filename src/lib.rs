@@ -7,6 +7,8 @@ pub mod extract;
 pub mod graph;
 pub mod layout;
 pub mod ptformat;
+#[cfg(feature = "tui")]
+pub mod tui;
 
 pub use extract::{
     ConfigBlock, Counts, Device, ExtractError, Info, Interface, Link, Port, Vlan, device_markdown,

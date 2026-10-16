@@ -1,0 +1,23 @@
+┌ Topology · Braille ────────────────────────────┐┌ Chi tiet ──────────────────┐
+│                                                ││PC 1                        │
+│                                                ││Pc PC-PT                    │
+│                                                ││                            │
+│                                                ││FastEthernet0: 10.0.0.2     │
+│                                                ││                            │
+│                                                ││Lien ket (j/k, Enter):      │
+│                   R&D                          ││> FastEthernet0 ↔ Switch -  │
+│                   ⠳⡄                           ││tang1:FastEthernet0/1       │
+│                    ⠙⢦                          ││                            │
+│                     ⠈⠳⣄                        ││Config:                     │
+│                       ⠘Switch - tang1          ││enable secret <redacted>    │
+│                         ⠘⢄                     ││                            │
+│                           ⠣⡀                   ││                            │
+│                            ⠈⢆                  ││                            │
+│                              ⠱PC 1             ││                            │
+│                               ⠈                ││                            │
+│                                                ││                            │
+│                                                ││                            │
+│                                                ││                            │
+│                                                ││                            │
+└────────────────────────────────────────────────┘└────────────────────────────┘
+ MASKED  3/3 node · force · zoom 1.0 · local off ·    ?:help

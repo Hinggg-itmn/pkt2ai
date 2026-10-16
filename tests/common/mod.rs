@@ -20,6 +20,7 @@ pub const SAMPLE_XML: &str = r#"<PACKETTRACER5>
 <LINK><TYPE>serial</TYPE><CABLE><FROM>99</FROM><TO>2</TO><PORT>Serial0</PORT><PORT>Serial0/0</PORT><TYPE>serial</TYPE></CABLE></LINK>
 </LINKS></NETWORK></PACKETTRACER5>"#;
 
+#[allow(dead_code)]
 pub fn temp_file(label: &str, content: &[u8]) -> PathBuf {
     let path = std::env::temp_dir().join(format!("pkt2ai-{label}-{}", std::process::id()));
     fs::write(&path, content).unwrap();

@@ -1,4 +1,5 @@
 use pkt2ai::{pkt_to_xml, xml_to_pkt};
+use std::time::Instant;
 use std::{fs, process::Command};
 
 fn hex(value: &str) -> Vec<u8> {
@@ -80,5 +81,34 @@ fn cross_checks_python_reference_when_available() {
 
     for path in [&xml_path, &py_pkt, &rust_pkt, &decoded] {
         let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn decodes_roughly_200kb_payload() {
+    let mut xml = b"<PACKETTRACER5><NETWORK><NOTE>".to_vec();
+    xml.extend((0..200_000).map(|index| b'a' + (index % 23) as u8));
+    xml.extend_from_slice(b"</NOTE></NETWORK></PACKETTRACER5>");
+    let packet = xml_to_pkt(&xml).unwrap();
+    let started = Instant::now();
+    assert_eq!(pkt_to_xml(&packet).unwrap(), xml);
+    eprintln!("decode 200KB XML: {:?}", started.elapsed());
+}
+
+#[test]
+fn decodes_optional_real_samples() {
+    let Some(directory) = std::env::var_os("PKT2AI_SAMPLES") else {
+        return;
+    };
+    for entry in fs::read_dir(directory).unwrap().filter_map(Result::ok) {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pkt"))
+        {
+            let xml = pkt_to_xml(&fs::read(&path).unwrap())
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert!(pkt2ai::ptformat::looks_like_xml(&xml), "{}", path.display());
+        }
     }
 }
