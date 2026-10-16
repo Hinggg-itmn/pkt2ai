@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::{
-    Device, Info, extract, find_device, links_of, pkt_to_xml, pkt_to_xml_with_verify, to_markdown,
-    tree_outline, xml_to_pkt,
+    Device, Info, extract, find_device, graph::Graph, layout::force_directed, links_of, pkt_to_xml,
+    pkt_to_xml_with_verify, to_markdown, tree_outline, xml_to_pkt,
 };
 
 #[derive(Debug, Parser)]
@@ -91,12 +91,31 @@ enum Command {
         #[arg(long)]
         device: Option<String>,
     },
+    /// Export the topology for graph tools or an Obsidian vault.
+    Export {
+        input: PathBuf,
+        #[arg(long, value_enum)]
+        format: ExportFormat,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SummaryFormat {
     Json,
     Md,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ExportFormat {
+    Dot,
+    Mermaid,
+    Graphml,
+    Svg,
+    Obsidian,
 }
 
 #[derive(Debug)]
@@ -153,8 +172,17 @@ fn load_xml_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
 }
 
 fn load_info(path: &Path, redact: bool, full_config: bool) -> Result<Info, CliError> {
-    let xml = load_xml_bytes(path)?;
-    extract(&xml, &source_name(path), redact, full_config).map_err(CliError::ordinary)
+    let data = read(path)?;
+    if data.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+        serde_json::from_slice(&data).map_err(CliError::ordinary)
+    } else {
+        let xml = if crate::ptformat::looks_like_xml(&data) {
+            data
+        } else {
+            pkt_to_xml(&data).map_err(CliError::ordinary)?
+        };
+        extract(&xml, &source_name(path), redact, full_config).map_err(CliError::ordinary)
+    }
 }
 
 fn default_output(input: &Path, extension: &str) -> PathBuf {
@@ -368,6 +396,62 @@ fn execute(command: Command) -> Result<Option<Vec<u8>>, CliError> {
             } else {
                 Ok(Some(text.into_bytes()))
             }
+        }
+        Command::Export {
+            input,
+            format,
+            output,
+            force,
+        } => {
+            let info = load_info(&input, true, false)?;
+            let graph = Graph::new(&info);
+            if matches!(format, ExportFormat::Obsidian) {
+                let notes = crate::export::obsidian(&info);
+                if output.exists() && !output.is_dir() {
+                    return Err(CliError::ordinary(format!(
+                        "{} da ton tai va khong phai thu muc",
+                        output.display()
+                    )));
+                }
+                if !force
+                    && let Some((name, _)) =
+                        notes.iter().find(|(name, _)| output.join(name).exists())
+                {
+                    return Err(CliError::ordinary(format!(
+                        "{} da ton tai; dung --force de ghi de",
+                        output.join(name).display()
+                    )));
+                }
+                fs::create_dir_all(&output).map_err(CliError::ordinary)?;
+                for (name, contents) in notes {
+                    fs::write(output.join(name), contents).map_err(CliError::ordinary)?;
+                }
+                return Ok(Some(
+                    format!("[+] {} -> {}\n", input.display(), output.display()).into_bytes(),
+                ));
+            }
+            if output.exists() && !force {
+                return Err(CliError::ordinary(format!(
+                    "{} da ton tai; dung --force de ghi de",
+                    output.display()
+                )));
+            }
+            let text = match format {
+                ExportFormat::Dot => crate::export::dot(&graph),
+                ExportFormat::Mermaid => crate::export::mermaid(&graph),
+                ExportFormat::Graphml => crate::export::graphml(&graph),
+                ExportFormat::Svg => crate::export::svg(
+                    &graph,
+                    &force_directed(&graph, 0x504b_5432_4149, 120),
+                    1000,
+                    700,
+                ),
+                ExportFormat::Obsidian => unreachable!(),
+            };
+            fs::write(&output, text).map_err(CliError::ordinary)?;
+            Ok(Some(
+                format!("[+] {} -> {}\n", input.display(), output.display()).into_bytes(),
+            ))
         }
     }
 }

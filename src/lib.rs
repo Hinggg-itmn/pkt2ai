@@ -2,7 +2,10 @@
 
 pub mod cli;
 pub mod crypto;
+pub mod export;
 pub mod extract;
+pub mod graph;
+pub mod layout;
 pub mod ptformat;
 
 pub use extract::{
